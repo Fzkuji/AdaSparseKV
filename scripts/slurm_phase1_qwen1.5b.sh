@@ -12,6 +12,7 @@ cd ~/kvpress/evaluation
 
 MODEL="Qwen/Qwen2.5-1.5B-Instruct"
 GPU="0"
+OUTPUT_DIR="./results/phase1_qwen1.5b"
 
 echo "===== Baseline: $MODEL ====="
 
@@ -23,7 +24,7 @@ for press in no_press snapkv expected_attention streaming_llm knorm; do
         echo ">>> RULER 4k: $press @ $cr"
         CUDA_VISIBLE_DEVICES=$GPU python evaluate.py \
             --model $MODEL --dataset ruler --data_dir 4096 \
-            --press_name $press --compression_ratio $cr
+            --press_name $press --compression_ratio $cr --output_dir $OUTPUT_DIR
     done
 done
 
@@ -35,7 +36,7 @@ for press in no_press snapkv expected_attention streaming_llm knorm; do
         echo ">>> RULER 16k: $press @ $cr"
         CUDA_VISIBLE_DEVICES=$GPU python evaluate.py \
             --model $MODEL --dataset ruler --data_dir 16384 \
-            --press_name $press --compression_ratio $cr
+            --press_name $press --compression_ratio $cr --output_dir $OUTPUT_DIR
     done
 done
 
@@ -47,7 +48,7 @@ for press in no_press snapkv expected_attention streaming_llm knorm; do
         echo ">>> LongBench: $press @ $cr"
         CUDA_VISIBLE_DEVICES=$GPU python evaluate.py \
             --model $MODEL --dataset longbench \
-            --press_name $press --compression_ratio $cr
+            --press_name $press --compression_ratio $cr --output_dir $OUTPUT_DIR
     done
 done
 
@@ -59,7 +60,7 @@ for press in no_press snapkv expected_attention streaming_llm; do
         echo ">>> AIME25: $press @ $cr"
         CUDA_VISIBLE_DEVICES=$GPU python evaluate.py \
             --model $MODEL --dataset aime25 \
-            --press_name $press --compression_ratio $cr
+            --press_name $press --compression_ratio $cr --output_dir $OUTPUT_DIR
     done
 done
 
