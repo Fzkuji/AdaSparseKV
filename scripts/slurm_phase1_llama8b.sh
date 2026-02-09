@@ -12,7 +12,7 @@ cd ~/kvpress/evaluation
 
 MODEL="meta-llama/Llama-3.1-8B-Instruct"
 OUTPUT_DIR="./results/phase1_llama8b"
-GPU="2,3"  # NVLink pair
+GPU="0,1"  # NVLink pair
 
 echo "===== Baseline: $MODEL ====="
 
