@@ -1,18 +1,18 @@
 #!/bin/bash
-#SBATCH --job-name=baseline_qwen1.5b
+#SBATCH --job-name=baseline_gpt_oss
 #SBATCH --output=/home/zichuanfu2/logs/output_%j.txt
 #SBATCH --error=/home/zichuanfu2/logs/error_%j.txt
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=60G
-#SBATCH --time=24:00:00
+#SBATCH --mem=80G
+#SBATCH --time=12:00:00
 
 conda activate adasparse
 
 cd ~/kvpress/evaluation
 
-MODEL="Qwen/Qwen2.5-1.5B-Instruct"
+MODEL="openai/gpt-oss-20b"
 GPU="0"
-OUTPUT_DIR="./results/phase1_qwen1.5b"
+OUTPUT_DIR="./results/phase1_gpt_oss"
 
 echo "===== Baseline: $MODEL ====="
 
