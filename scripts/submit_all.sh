@@ -47,6 +47,7 @@ for ds_entry in "${DATASETS[@]}"; do
 #SBATCH --error=/home/zichuanfu2/logs/error_%j.txt
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=80G
+#SBATCH --gres=gpu:2
 #SBATCH --time=23:00:00
 
 conda activate adasparse
@@ -62,11 +63,31 @@ CUDA_VISIBLE_DEVICES="0,1" python evaluate.py \\
     --output_dir ${OUTPUT_DIR}
 HEREDOC
 
+        # 构建结果目录名，跳过已完成的
+        RESULT_NAME="${DS_NAME}__${DS_DIR}__$(echo $MODEL | tr '/' '--')__${PRESS}__${CR}"
+        if [ -z "$DS_DIR" ]; then
+            RESULT_NAME="${DS_NAME}__4096__$(echo $MODEL | tr '/' '--')__${PRESS}__${CR}"
+        fi
+        RESULT_PATH="$(cd ~/kvpress/evaluation && pwd)/${OUTPUT_DIR}/${RESULT_NAME}/metrics.json"
+        
+        if [ -f "$RESULT_PATH" ]; then
+            echo "  [skip] $JOB_NAME (already done)"
+            continue
+        fi
+        
         echo "  [$COUNT] $JOB_NAME"
         sbatch /tmp/job_${JOB_NAME}.sh
         COUNT=$((COUNT + 1))
+        
+        # 每 4 个暂停，等用户确认
+        if [ $((COUNT % 4)) -eq 0 ]; then
+            echo ""
+            echo "--- Submitted $COUNT jobs (limit 4). Wait for these to finish, then run again. ---"
+            echo "--- Check: squeue -u zichuanfu2 ---"
+            exit 0
+        fi
     done
 done
 
 echo ""
-echo "Submitted $COUNT jobs. Check: squeue -u zichuanfu2"
+echo "All $COUNT jobs submitted. Check: squeue -u zichuanfu2"
