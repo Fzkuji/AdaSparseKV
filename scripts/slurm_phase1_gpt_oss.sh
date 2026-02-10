@@ -4,7 +4,7 @@
 #SBATCH --error=/home/zichuanfu2/logs/error_%j.txt
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=80G
-#SBATCH --time=12:00:00
+#SBATCH --time=23:00:00
 
 conda activate adasparse
 
