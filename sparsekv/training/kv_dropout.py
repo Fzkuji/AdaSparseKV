@@ -1,326 +1,192 @@
 """
-KV Dropout Module
+KV Dropout: Per-layer per-head KV cache eviction during training.
 
-Implements KV cache eviction during forward pass via attention masking.
+Mask shape: (B, num_layers, num_heads, L)
+- Each layer and each head can have a different eviction pattern
+- Anchor tokens are always kept across all layers/heads
+- Non-anchor budget is allocated per-head (AdaKV-style: heads with more
+  concentrated attention get less budget, dispersed heads get more)
 
-Approach:
-- Given a KV retention mask (B, L), construct a 4D attention mask
-- The 4D mask is (B, 1, L, L) where mask[b, :, i, j] = can query i attend to key j?
-- During SDPA, masked-out positions receive -inf logits → zero attention
-
-This simulates KV cache eviction without modifying the model architecture.
+Implementation: patches torch SDPA to inject layer-specific per-head masks.
+A layer counter tracks which layer is currently being computed.
 """
 
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
+import torch.nn.functional as F
+from typing import Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-class KVDropoutContext:
+def create_kv_dropout_mask(
+    anchor_mask: torch.Tensor,
+    keep_ratio: float,
+    seq_len: int,
+    num_layers: int = 1,
+    num_heads: int = 1,
+) -> torch.Tensor:
     """
-    Context manager for applying KV dropout during forward pass.
-    
-    Usage:
-        with KVDropoutContext(model, kv_mask):
-            outputs = model(input_ids, attention_mask=...)
-    """
-    
-    def __init__(
-        self,
-        model: nn.Module,
-        kv_mask: torch.Tensor,
-        original_attention_mask: Optional[torch.Tensor] = None,
-    ):
-        """
-        Args:
-            model: the LLM (e.g., LlamaForCausalLM, Qwen2ForCausalLM)
-            kv_mask: (B, L) boolean mask, True = keep this KV position
-            original_attention_mask: (B, L) padding mask, 1 = valid token
-        """
-        self.model = model
-        self.kv_mask = kv_mask
-        self.original_attention_mask = original_attention_mask
-        
-        self._hooks = []
-        self._original_forward = {}
-    
-    def __enter__(self):
-        """Install hooks to inject KV dropout."""
-        self._install_kv_dropout()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Remove hooks."""
-        self._remove_kv_dropout()
-    
-    def _install_kv_dropout(self):
-        """
-        Modify attention computation to apply KV masking.
-        
-        Strategy:
-        - Find all attention layers in the model
-        - Override their attention_mask handling to include KV dropout
-        """
-        # Build 4D attention mask
-        attention_mask_4d = self._build_4d_attention_mask()
-        
-        # Store in model temporarily (to be accessed by attention layers)
-        self.model._kv_dropout_mask = attention_mask_4d
-        
-        # Hook into attention layers
-        for name, module in self.model.named_modules():
-            if self._is_attention_layer(module):
-                # Store original forward
-                self._original_forward[name] = module.forward
-                
-                # Replace with wrapped version
-                module.forward = self._make_wrapped_forward(module, attention_mask_4d)
-    
-    def _remove_kv_dropout(self):
-        """Restore original forward methods."""
-        # Remove stored mask
-        if hasattr(self.model, '_kv_dropout_mask'):
-            delattr(self.model, '_kv_dropout_mask')
-        
-        # Restore original forwards
-        for name, module in self.model.named_modules():
-            if name in self._original_forward:
-                module.forward = self._original_forward[name]
-        
-        self._original_forward.clear()
-    
-    def _is_attention_layer(self, module) -> bool:
-        """Check if module is an attention layer."""
-        # Common attention layer names across models
-        class_name = module.__class__.__name__
-        return any(x in class_name.lower() for x in ['attention', 'attn'])
-    
-    def _build_4d_attention_mask(self) -> torch.Tensor:
-        """
-        Build 4D attention mask that combines:
-        1. Causal mask (can't attend to future)
-        2. Padding mask (can't attend to padding)
-        3. KV dropout mask (can't attend to evicted KV positions)
-        
-        Returns:
-            mask_4d: (B, 1, L, L) where mask[b, :, i, j] indicates if query i can attend to key j
-                     Values: 0.0 = can attend, -inf = cannot attend
-        """
-        B, L = self.kv_mask.shape
-        device = self.kv_mask.device
-        dtype = torch.float32  # SDPA will cast as needed
-        
-        # Start with causal mask: (L, L) upper triangular
-        causal_mask = torch.triu(
-            torch.full((L, L), float('-inf'), device=device, dtype=dtype),
-            diagonal=1,
-        )
-        # Shape: (1, 1, L, L)
-        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
-        
-        # Combine with KV dropout mask
-        # kv_mask: (B, L) → broadcast to (B, 1, 1, L)
-        # If kv_mask[b, j] = False → cannot attend to position j
-        kv_mask_4d = self.kv_mask.unsqueeze(1).unsqueeze(1).float()  # (B, 1, 1, L)
-        kv_mask_4d = torch.where(
-            kv_mask_4d.bool(),
-            torch.tensor(0.0, device=device, dtype=dtype),
-            torch.tensor(float('-inf'), device=device, dtype=dtype),
-        )
-        
-        # Combine causal + KV dropout
-        mask_4d = causal_mask + kv_mask_4d  # Broadcasting: (B, 1, L, L)
-        
-        # Apply padding mask if provided
-        if self.original_attention_mask is not None:
-            # original_attention_mask: (B, L), 1 = valid, 0 = padding
-            padding_mask = self.original_attention_mask.unsqueeze(1).unsqueeze(1).float()  # (B, 1, 1, L)
-            padding_mask = torch.where(
-                padding_mask.bool(),
-                torch.tensor(0.0, device=device, dtype=dtype),
-                torch.tensor(float('-inf'), device=device, dtype=dtype),
-            )
-            mask_4d = mask_4d + padding_mask
-        
-        return mask_4d
-    
-    def _make_wrapped_forward(self, original_module, kv_dropout_mask):
-        """
-        Create a wrapped forward function that injects KV dropout mask.
-        
-        This is tricky because different models have different attention APIs.
-        We'll use a generic approach: if attention_mask is passed, merge it with our mask.
-        """
-        original_forward = original_module.forward
-        
-        def wrapped_forward(*args, **kwargs):
-            # Inject or merge attention_mask
-            if 'attention_mask' in kwargs:
-                # Merge with existing mask
-                existing_mask = kwargs['attention_mask']
-                # If existing mask is 2D, expand it
-                if existing_mask.dim() == 2:
-                    B, L = existing_mask.shape
-                    # This is a padding mask, already handled in _build_4d_attention_mask
-                    pass
-                # Use our KV dropout mask
-                kwargs['attention_mask'] = kv_dropout_mask
-            else:
-                kwargs['attention_mask'] = kv_dropout_mask
-            
-            return original_forward(*args, **kwargs)
-        
-        return wrapped_forward
-
-
-def apply_kv_dropout(
-    model: nn.Module,
-    input_ids: torch.Tensor,
-    kv_mask: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    labels: Optional[torch.Tensor] = None,
-    **kwargs,
-):
-    """
-    Convenience function: run forward pass with KV dropout.
+    Create per-layer per-head KV dropout mask.
     
     Args:
-        model: LLM
-        input_ids: (B, L)
-        kv_mask: (B, L) boolean, True = keep
-        attention_mask: (B, L) padding mask
-        labels: (B, L) optional labels for loss
-        **kwargs: other forward arguments
-    
-    Returns:
-        model outputs
-    """
-    with KVDropoutContext(model, kv_mask, attention_mask):
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            **kwargs,
-        )
-    return outputs
-
-
-# ============================================================
-# Alternative: Patch SDPA directly (more robust)
-# ============================================================
-
-class SDPAKVDropout:
-    """
-    More robust approach: patch torch.nn.functional.scaled_dot_product_attention
-    to inject KV mask directly.
-    
-    This avoids model-specific attention layer detection.
-    """
-    
-    def __init__(self, kv_mask: torch.Tensor, original_attention_mask: Optional[torch.Tensor] = None):
-        self.kv_mask = kv_mask
-        self.original_attention_mask = original_attention_mask
-        self.attention_mask_4d = None
+        anchor_mask: (B, L) bool, True = anchor (always keep)
+        keep_ratio: fraction of total tokens to keep
+        seq_len: sequence length
+        num_layers: number of attention layers
+        num_heads: number of KV heads (num_key_value_heads, not num_attention_heads)
         
+    Returns:
+        mask: (B, num_layers, num_heads, L) bool, True = keep
+    """
+    B, L = anchor_mask.shape
+    device = anchor_mask.device
+    
+    total_keep = max(int(L * keep_ratio), 1)
+    
+    # Expand anchor mask to all layers/heads: anchors always kept
+    # (B, L) → (B, num_layers, num_heads, L)
+    mask = anchor_mask.unsqueeze(1).unsqueeze(2).expand(B, num_layers, num_heads, L).clone()
+    
+    num_anchors = anchor_mask.sum(dim=-1)  # (B,)
+    
+    for b in range(B):
+        n_anchors = num_anchors[b].item()
+        remaining_budget = max(total_keep - n_anchors, 0)
+        
+        if remaining_budget <= 0:
+            continue
+        
+        non_anchor_positions = (~anchor_mask[b]).nonzero(as_tuple=True)[0]
+        n_non_anchor = len(non_anchor_positions)
+        
+        if n_non_anchor == 0:
+            continue
+        
+        # Each layer-head combination gets its own random sample
+        for l in range(num_layers):
+            for h in range(num_heads):
+                n_sample = min(remaining_budget, n_non_anchor)
+                perm = torch.randperm(n_non_anchor, device=device)[:n_sample]
+                selected = non_anchor_positions[perm]
+                mask[b, l, h, selected] = True
+    
+    return mask
+
+
+def layer_mask_to_4d_attention_mask(
+    layer_mask: torch.Tensor,
+    seq_len: int,
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """
+    Convert a per-head mask for ONE layer to a 4D SDPA attention mask.
+    
+    Args:
+        layer_mask: (B, num_heads, L) bool, True = keep
+        seq_len: sequence length
+        dtype: output dtype
+        
+    Returns:
+        attn_mask: (B, num_heads, L, L) float, 0 = attend, -inf = mask
+    """
+    B, H, L = layer_mask.shape
+    device = layer_mask.device
+    
+    # Causal mask: (1, 1, L, L)
+    causal_mask = torch.triu(
+        torch.full((L, L), float('-inf'), device=device, dtype=dtype),
+        diagonal=1,
+    ).unsqueeze(0).unsqueeze(0)
+    
+    # KV mask: (B, H, 1, L) → broadcast to (B, H, L, L)
+    kv_mask = layer_mask.unsqueeze(2).float()  # (B, H, 1, L)
+    kv_mask = torch.where(
+        kv_mask.bool(),
+        torch.tensor(0.0, device=device, dtype=dtype),
+        torch.tensor(float('-inf'), device=device, dtype=dtype),
+    )
+    
+    # Combine
+    attn_mask = causal_mask + kv_mask  # (B, H, L, L)
+    
+    return attn_mask
+
+
+class PerLayerKVDropout:
+    """
+    Context manager that patches SDPA to apply per-layer per-head KV masks.
+    
+    Tracks which layer is being computed via a counter. Each SDPA call
+    corresponds to one layer; applies the corresponding mask from the
+    full (B, num_layers, num_heads, L) mask tensor.
+    
+    Usage:
+        mask = create_kv_dropout_mask(anchor_mask, keep_ratio, L, num_layers, num_heads)
+        with PerLayerKVDropout(mask):
+            outputs = model(input_ids)
+    """
+    
+    def __init__(self, full_mask: torch.Tensor, dtype: torch.dtype = torch.bfloat16):
+        """
+        Args:
+            full_mask: (B, num_layers, num_heads, L) bool mask
+            dtype: attention mask dtype
+        """
+        self.full_mask = full_mask
+        self.dtype = dtype
+        self.B, self.num_layers, self.num_heads, self.L = full_mask.shape
+        
+        # Precompute 4D attention masks for each layer
+        self.layer_attn_masks = []
+        for l in range(self.num_layers):
+            layer_mask = full_mask[:, l, :, :]  # (B, H, L)
+            attn_mask = layer_mask_to_4d_attention_mask(layer_mask, self.L, dtype)
+            self.layer_attn_masks.append(attn_mask)
+        
+        self._layer_counter = 0
         self._original_sdpa = None
     
     def __enter__(self):
-        """Patch SDPA."""
-        self.attention_mask_4d = self._build_4d_mask()
-        
-        # Save original SDPA
-        import torch.nn.functional as F
+        self._layer_counter = 0
         self._original_sdpa = F.scaled_dot_product_attention
         
-        # Replace with wrapper
-        F.scaled_dot_product_attention = self._wrapped_sdpa
+        ctx = self  # capture for closure
+        original = self._original_sdpa
         
+        def patched_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
+            layer_idx = ctx._layer_counter
+            
+            if layer_idx < ctx.num_layers:
+                # Get per-head mask for this layer
+                our_mask = ctx.layer_attn_masks[layer_idx]
+                
+                # Handle GQA: if query heads > KV heads, expand mask
+                q_heads = query.shape[1]
+                kv_heads = our_mask.shape[1]
+                if q_heads != kv_heads and kv_heads > 0:
+                    groups = q_heads // kv_heads
+                    our_mask = our_mask.unsqueeze(2).expand(
+                        -1, -1, groups, -1, -1
+                    ).reshape(our_mask.shape[0], q_heads, our_mask.shape[2], our_mask.shape[3])
+                
+                # Merge with existing mask
+                if attn_mask is not None:
+                    combined = attn_mask + our_mask
+                else:
+                    combined = our_mask
+                
+                ctx._layer_counter += 1
+                return original(query, key, value, attn_mask=combined, dropout_p=dropout_p, is_causal=False, **kwargs)
+            else:
+                # Beyond expected layers, pass through
+                ctx._layer_counter += 1
+                return original(query, key, value, attn_mask=attn_mask, dropout_p=dropout_p, is_causal=is_causal, **kwargs)
+        
+        F.scaled_dot_product_attention = patched_sdpa
         return self
     
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Restore SDPA."""
-        import torch.nn.functional as F
-        if self._original_sdpa is not None:
-            F.scaled_dot_product_attention = self._original_sdpa
-    
-    def _build_4d_mask(self) -> torch.Tensor:
-        """Same as KVDropoutContext._build_4d_attention_mask."""
-        B, L = self.kv_mask.shape
-        device = self.kv_mask.device
-        dtype = torch.float32
-        
-        # Causal mask
-        causal_mask = torch.triu(
-            torch.full((L, L), float('-inf'), device=device, dtype=dtype),
-            diagonal=1,
-        ).unsqueeze(0).unsqueeze(0)
-        
-        # KV dropout mask
-        kv_mask_4d = self.kv_mask.unsqueeze(1).unsqueeze(1).float()
-        kv_mask_4d = torch.where(
-            kv_mask_4d.bool(),
-            torch.tensor(0.0, device=device, dtype=dtype),
-            torch.tensor(float('-inf'), device=device, dtype=dtype),
-        )
-        
-        mask_4d = causal_mask + kv_mask_4d
-        
-        # Padding
-        if self.original_attention_mask is not None:
-            padding_mask = self.original_attention_mask.unsqueeze(1).unsqueeze(1).float()
-            padding_mask = torch.where(
-                padding_mask.bool(),
-                torch.tensor(0.0, device=device, dtype=dtype),
-                torch.tensor(float('-inf'), device=device, dtype=dtype),
-            )
-            mask_4d = mask_4d + padding_mask
-        
-        return mask_4d
-    
-    def _wrapped_sdpa(self, query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
-        """
-        Wrapped SDPA that injects our KV dropout mask.
-        
-        Args are same as torch.nn.functional.scaled_dot_product_attention.
-        """
-        # Merge our mask with any existing mask
-        if attn_mask is not None:
-            # Merge (element-wise minimum of logits)
-            combined_mask = torch.minimum(attn_mask, self.attention_mask_4d)
-        else:
-            combined_mask = self.attention_mask_4d
-        
-        # Call original SDPA with our mask
-        return self._original_sdpa(
-            query, key, value,
-            attn_mask=combined_mask,
-            dropout_p=dropout_p,
-            is_causal=False,  # Already handled in our mask
-            **kwargs,
-        )
-
-
-def apply_kv_dropout_sdpa(
-    model: nn.Module,
-    input_ids: torch.Tensor,
-    kv_mask: torch.Tensor,
-    attention_mask: Optional[torch.Tensor] = None,
-    labels: Optional[torch.Tensor] = None,
-    **kwargs,
-):
-    """
-    Apply KV dropout via SDPA patching (recommended).
-    
-    More robust than hooking into attention layers.
-    """
-    with SDPAKVDropout(kv_mask, attention_mask):
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-            **kwargs,
-        )
-    return outputs
+    def __exit__(self, *args):
+        F.scaled_dot_product_attention = self._original_sdpa
+        self._original_sdpa = None

@@ -27,7 +27,7 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
 from sparsekv.training.anchor import AnchorSelector, AnchorConfig
-from sparsekv.training.kv_dropout import create_kv_dropout_mask, keep_mask_to_4d_attention_mask
+from sparsekv.training.kv_dropout import create_kv_dropout_mask, PerLayerKVDropout
 from sparsekv.training.scheduler import CompressionScheduler, SchedulerConfig
 
 logger = logging.getLogger(__name__)
@@ -155,6 +155,14 @@ class SparseKVTrainer:
         """
         B, L = input_ids.shape
         
+        # Get model config for num_layers and num_kv_heads
+        model_config = self.model.config
+        if hasattr(model_config, 'num_hidden_layers'):
+            num_layers = model_config.num_hidden_layers
+        else:
+            num_layers = model_config.n_layer
+        num_kv_heads = getattr(model_config, 'num_key_value_heads', model_config.num_attention_heads)
+        
         # ---- Step 1: Full forward (teacher, no grad) ----
         with torch.no_grad():
             full_outputs = self.model(
@@ -163,22 +171,22 @@ class SparseKVTrainer:
             )
             teacher_logits = full_outputs.logits  # (B, L, V)
         
-        # ---- Step 2: Create KV dropout mask ----
+        # ---- Step 2: Create per-layer per-head KV dropout mask ----
         anchor_mask = self.anchor_selector.get_anchor_mask(input_ids)  # (B, L)
-        keep_mask = create_kv_dropout_mask(anchor_mask, keep_ratio, L)  # (B, L)
-        
-        # Build 4D attention mask for SDPA
-        attn_mask_4d = keep_mask_to_4d_attention_mask(
-            keep_mask, L,
-            dtype=teacher_logits.dtype,
-        )  # (B, 1, L, L)
+        full_mask = create_kv_dropout_mask(
+            anchor_mask, keep_ratio, L,
+            num_layers=num_layers,
+            num_heads=num_kv_heads,
+        )  # (B, num_layers, num_kv_heads, L)
         
         # ---- Step 3: Evicted forward (student, with grad) ----
-        evict_outputs = self.model(
-            input_ids=input_ids,
-            attention_mask=attn_mask_4d,
-            labels=labels,
-        )
+        # PerLayerKVDropout patches SDPA to apply per-layer per-head masks
+        with PerLayerKVDropout(full_mask, dtype=teacher_logits.dtype):
+            evict_outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
         
         # CE loss from evicted forward
         ce_loss = evict_outputs.loss
@@ -200,7 +208,7 @@ class SparseKVTrainer:
         
         # Metrics
         anchor_ratio = anchor_mask.float().mean().item()
-        kept_ratio = keep_mask.float().mean().item()
+        kept_ratio = full_mask.float().mean().item()
         
         metrics = {
             "ce_loss": ce_loss.item(),
