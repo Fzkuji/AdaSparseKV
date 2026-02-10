@@ -17,7 +17,7 @@ GPU="0,1"  # NVLink pair
 echo "===== Baseline: $MODEL ====="
 
 # RULER 4k
-for press in no_press snapkv expected_attention streaming_llm knorm; do
+for press in no_press snapkv streaming_llm critical_snapkv kvzip; do
     for cr in 0 0.3 0.5 0.7; do
         if [ "$press" = "no_press" ] && [ "$cr" != "0" ]; then continue; fi
         if [ "$press" != "no_press" ] && [ "$cr" = "0" ]; then continue; fi
@@ -29,7 +29,7 @@ for press in no_press snapkv expected_attention streaming_llm knorm; do
 done
 
 # RULER 16k
-for press in no_press snapkv expected_attention streaming_llm knorm; do
+for press in no_press snapkv streaming_llm critical_snapkv kvzip; do
     for cr in 0 0.3 0.5 0.7; do
         if [ "$press" = "no_press" ] && [ "$cr" != "0" ]; then continue; fi
         if [ "$press" != "no_press" ] && [ "$cr" = "0" ]; then continue; fi
@@ -41,7 +41,7 @@ for press in no_press snapkv expected_attention streaming_llm knorm; do
 done
 
 # LongBench
-for press in no_press snapkv expected_attention streaming_llm knorm; do
+for press in no_press snapkv streaming_llm critical_snapkv kvzip; do
     for cr in 0 0.3 0.5 0.7; do
         if [ "$press" = "no_press" ] && [ "$cr" != "0" ]; then continue; fi
         if [ "$press" != "no_press" ] && [ "$cr" = "0" ]; then continue; fi
@@ -53,7 +53,7 @@ for press in no_press snapkv expected_attention streaming_llm knorm; do
 done
 
 # AIME25
-for press in no_press snapkv expected_attention streaming_llm; do
+for press in no_press snapkv streaming_llm critical_snapkv; do
     for cr in 0 0.5 0.7; do
         if [ "$press" = "no_press" ] && [ "$cr" != "0" ]; then continue; fi
         if [ "$press" != "no_press" ] && [ "$cr" = "0" ]; then continue; fi
