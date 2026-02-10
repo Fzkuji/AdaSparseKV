@@ -58,7 +58,7 @@ CUDA_VISIBLE_DEVICES="0,1" python evaluate.py \\
     --dataset ${DS_NAME} ${DATA_DIR_ARG} \\
     --press_name ${PRESS} \\
     --compression_ratio ${CR} \\
-    --fraction 0.3 \\
+    \\
     --output_dir ${OUTPUT_DIR}
 HEREDOC
 
