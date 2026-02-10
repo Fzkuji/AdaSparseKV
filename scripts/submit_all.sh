@@ -74,7 +74,7 @@ for ds_entry in "${DATASETS[@]}"; do
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=80G
 #SBATCH --gres=gpu:2
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 
 conda activate adasparse
 cd ~/kvpress/evaluation
