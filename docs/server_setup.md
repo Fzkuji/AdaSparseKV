@@ -68,21 +68,71 @@ print('All good!')
 "
 ```
 
-## 9. 运行 Llama Baseline 评测
+## 9. 运行评测
+
+### 基本用法
 
 ```bash
 cd ~/SparseKV
-bash scripts/submit_all.sh llama
-squeue -u $(whoami)
+
+# Phase 1: Baseline 评测
+bash scripts/submit_all.sh qwen3          # Qwen3-8B
+bash scripts/submit_all.sh llama          # Llama-3.1-8B-Instruct
+
+# Phase 3: 训练后模型评测
+bash scripts/submit_all.sh qwen3_trained
+bash scripts/submit_all.sh llama_trained
 ```
 
-每次提交 4 个任务，跑完后再执行一次 `bash scripts/submit_all.sh llama`，自动跳过已完成的。
+### GPU 选择
+
+默认使用 GPU 0,1。通过 `GPUS` 环境变量指定使用哪些卡：
+
+```bash
+# 使用 GPU 2 和 3
+GPUS="2,3" bash scripts/submit_all.sh qwen3
+
+# 使用单张卡
+GPUS="0" bash scripts/submit_all.sh qwen3
+```
+
+每个 job 使用 1 张 GPU，多张卡时 job 会交替分配到不同卡上并行执行。
+
+### 断点续跑
+
+脚本会自动跳过已完成的任务（检查 `metrics.json` 是否存在）。每次提交一批 job（默认 8 个），跑完后再执行一次同样的命令即可继续：
+
+```bash
+# 查看当前任务状态
+squeue -u $(whoami)
+
+# 任务跑完后，再次执行会自动跳过已完成的
+GPUS="2,3" bash scripts/submit_all.sh qwen3
+```
+
+### 评测矩阵
+
+每个模型会测试以下组合（4 datasets × 13 press configs = 52 个条件）：
+
+**Datasets:**
+- RULER 4k, RULER 16k, LongBench, AIME25
+
+**Eviction methods × compression ratios:**
+- no_press (baseline, 无压缩)
+- snapkv: 0.3, 0.5, 0.7
+- streaming_llm: 0.3, 0.5, 0.7
+- critical_snapkv: 0.3, 0.5, 0.7
+- kvzip: 0.3, 0.5, 0.7
 
 ## 10. 查看结果
 
 ```bash
-# 查看所有结果
-find ~/kvpress/evaluation/results/phase1_llama -name "metrics.json" | while read f; do
+# 查看已完成的条件
+ls ~/kvpress/evaluation/results/phase1_qwen3/*/metrics.json 2>/dev/null | \
+    sed 's|.*/phase1_qwen3/||;s|/metrics.json||'
+
+# 查看所有结果分数
+find ~/kvpress/evaluation/results/phase1_qwen3 -name "metrics.json" | sort | while read f; do
     echo "=== $(basename "$(dirname "$f")") ==="
     cat "$f" | python -c "
 import sys,json
@@ -93,15 +143,17 @@ if vals: print(f'  Avg: {sum(vals)/len(vals):.2f}')
 done
 
 # 查看 profiling（时间/显存/吞吐量）
-find ~/kvpress/evaluation/results/phase1_llama -name "profiling.json" -exec cat {} \;
+find ~/kvpress/evaluation/results/phase1_qwen3 -name "profiling.json" -exec cat {} \;
 ```
 
 ## 环境要求
 
 | 项目 | 最低要求 |
 |------|---------|
-| GPU | 2× A100 80GB（或同级） |
+| GPU | 1× A100 80GB（单 job）|
 | CUDA | 12.1+ |
-| 内存 | 80GB+ |
+| 内存 | 60GB+ |
 | 磁盘 | 50GB+（模型缓存） |
 | Python | 3.11 |
+
+> 注：多张卡可并行跑多个 job，每个 job 独占 1 张卡。
