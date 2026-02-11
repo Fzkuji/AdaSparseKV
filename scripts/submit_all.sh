@@ -65,6 +65,7 @@ for ds_entry in "${DATASETS[@]}"; do
         CR_FMT=$(printf "%.2f" "$CR")
         RESULT_NAME="${DS_NAME}__${DS_DIR:-4096}__$(echo $MODEL | sed 's|/|--|g')__${PRESS}__${CR_FMT}"
         RESULT_PATH="$HOME/kvpress/evaluation/${OUTPUT_DIR}/${RESULT_NAME}/metrics.json"
+        echo "    checking: $RESULT_PATH"
         if [ -f "$RESULT_PATH" ]; then
             echo "  [skip] $JOB_NAME (done)"
             continue
