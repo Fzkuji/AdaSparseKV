@@ -79,10 +79,10 @@ for ds_entry in "${DATASETS[@]}"; do
 #SBATCH --gres=gpu:2
 #SBATCH --time=24:00:00
 
-source activate adasparse
+eval "\$(conda shell.bash hook 2>/dev/null)" && conda activate adasparse
 cd ~/kvpress/evaluation
 
-CUDA_VISIBLE_DEVICES="${GPUS}" python ~/AdaSparseKV/scripts/eval_wrapper.py \\
+CUDA_VISIBLE_DEVICES="${GPUS}" python ~/SparseKV/scripts/eval_wrapper.py \\
     --model ${MODEL} \\
     --dataset ${DS_NAME} ${DATA_DIR_ARG} \\
     --press_name ${PRESS} \\
