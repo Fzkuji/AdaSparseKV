@@ -1,70 +1,84 @@
 #!/bin/bash
-# Run all evaluations on a multi-GPU server (no slurm).
-# Each eval gets its own GPU, runs in parallel.
+# Run all baseline evaluations on a multi-GPU server (no slurm).
+# Replaces submit_all.sh for non-slurm environments.
 #
 # Usage:
-#   bash scripts/run_all.sh base         # Base Qwen3-8B
-#   bash scripts/run_all.sh v6a          # v6a adapter
-#   bash scripts/run_all.sh v6b          # v6b adapter
-#   bash scripts/run_all.sh v7           # v7 adapter
-#   bash scripts/run_all.sh all          # All of the above
+#   bash scripts/run_all.sh                    # Run all 52 combos
+#   bash scripts/run_all.sh --model Qwen/Qwen3-8B   # Specify model
 #
 # Environment variables:
-#   MODEL_PATH    - path to base model (default: /mnt/data/zichuanfu/models/Qwen3-8B)
-#   ADAPTER_DIR   - path to adapter directory (default: ~/models/adapters)
-#   KVPRESS_EVAL  - path to kvpress/evaluation (default: ~/kvpress/evaluation)
-#   OUTPUT_DIR    - output directory (default: ~/SparseKV/analysis/ruler_results)
+#   MODEL         - model name/path (default: Qwen/Qwen3-8B)
 #   GPUS          - comma-separated GPU ids (default: all available)
-#   DATASETS      - override dataset list (default: ruler:4096)
+#   OUTPUT_DIR    - output directory (default: ./results/phase1_qwen3)
 #   LOG_DIR       - log directory (default: ~/eval_logs)
+#   MAX_PARALLEL  - max parallel jobs (default: number of GPUs)
 
 set -e
 
-MODEL_PATH=${MODEL_PATH:-/mnt/data/zichuanfu/models/Qwen3-8B}
-ADAPTER_DIR=${ADAPTER_DIR:-~/models/adapters}
-KVPRESS_EVAL=${KVPRESS_EVAL:-~/kvpress/evaluation}
-OUTPUT_DIR=${OUTPUT_DIR:-~/SparseKV/analysis/ruler_results}
+MODEL=${MODEL:-Qwen/Qwen3-8B}
+OUTPUT_DIR=${OUTPUT_DIR:-./results/phase1_qwen3}
 LOG_DIR=${LOG_DIR:-~/eval_logs}
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$OUTPUT_DIR"
 
-# Auto-detect GPUs if not specified
+# Auto-detect GPUs
 if [ -z "$GPUS" ]; then
     NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
     GPUS=$(seq -s, 0 $((NUM_GPUS-1)))
 fi
 IFS=',' read -ra GPU_LIST <<< "$GPUS"
 NUM_GPUS=${#GPU_LIST[@]}
-echo "Using GPUs: ${GPUS} (${NUM_GPUS} total)"
+MAX_PARALLEL=${MAX_PARALLEL:-$NUM_GPUS}
 
-# Evaluation configs
-PRESSES=("snapkv:0.0" "snapkv:0.3" "snapkv:0.5" "snapkv:0.7" "snapkv:0.9")
+echo "Model:        ${MODEL}"
+echo "Output:       ${OUTPUT_DIR}"
+echo "GPUs:         ${GPUS} (${NUM_GPUS} total, max ${MAX_PARALLEL} parallel)"
+echo "Logs:         ${LOG_DIR}"
+echo ""
 
-run_model() {
-    local MODEL_TAG=$1
-    local ADAPTER_ARG=$2
+DATASETS=("ruler:4096" "ruler:16384" "longbench:" "aime25:")
+PRESSES=("no_press:0" "snapkv:0.3" "snapkv:0.5" "snapkv:0.7" "streaming_llm:0.3" "streaming_llm:0.5" "streaming_llm:0.7" "critical_snapkv:0.3" "critical_snapkv:0.5" "critical_snapkv:0.7" "kvzip:0.3" "kvzip:0.5" "kvzip:0.7")
 
-    echo ""
-    echo "============================================================"
-    echo "  Evaluating: ${MODEL_TAG}"
-    echo "============================================================"
+TOTAL=$((${#DATASETS[@]} * ${#PRESSES[@]}))
+echo "Total combos: ${TOTAL}"
+echo ""
 
-    PIDS=()
-    GPU_IDX=0
+# Change to kvpress evaluation dir
+cd ~/kvpress/evaluation
+
+PIDS=()
+GPU_IDX=0
+RUNNING=0
+SKIPPED=0
+LAUNCHED=0
+
+for ds_entry in "${DATASETS[@]}"; do
+    DS_NAME="${ds_entry%%:*}"
+    DS_DIR="${ds_entry##*:}"
 
     for press_entry in "${PRESSES[@]}"; do
         PRESS="${press_entry%%:*}"
         CR="${press_entry##*:}"
         CR_FMT=$(printf "%.2f" "$CR")
 
+        JOB_NAME="${DS_NAME}_${DS_DIR:-default}_${PRESS}_${CR_FMT}"
+
+        # Build data_dir arg
+        DATA_DIR_ARG=""
+        if [ -n "$DS_DIR" ]; then
+            DATA_DIR_ARG="--data_dir $DS_DIR"
+        fi
+
         # Check if already done
-        RESULT_DIR="${OUTPUT_DIR}/ruler__4096__${MODEL_TAG}__${PRESS}__${CR_FMT}__fraction0.100"
-        if [ -f "${RESULT_DIR}/metrics.json" ]; then
-            echo "  [skip] ${MODEL_TAG} ${PRESS} CR=${CR} (already done)"
+        RESULT_NAME="${DS_NAME}__${DS_DIR:-4096}__$(echo $MODEL | sed 's|/|--|g')__${PRESS}__${CR_FMT}"
+        RESULT_PATH="${OUTPUT_DIR}/${RESULT_NAME}/metrics.json"
+        if [ -f "$RESULT_PATH" ]; then
+            echo "[skip] ${JOB_NAME} (done)"
+            SKIPPED=$((SKIPPED + 1))
             continue
         fi
 
-        # Wait for a free GPU if all are busy
-        while [ ${#PIDS[@]} -ge ${NUM_GPUS} ]; do
+        # Wait for a free slot
+        while [ ${#PIDS[@]} -ge ${MAX_PARALLEL} ]; do
             NEW_PIDS=()
             for pid in "${PIDS[@]}"; do
                 if kill -0 "$pid" 2>/dev/null; then
@@ -72,7 +86,7 @@ run_model() {
                 fi
             done
             PIDS=("${NEW_PIDS[@]}")
-            if [ ${#PIDS[@]} -ge ${NUM_GPUS} ]; then
+            if [ ${#PIDS[@]} -ge ${MAX_PARALLEL} ]; then
                 sleep 5
             fi
         done
@@ -80,65 +94,34 @@ run_model() {
         GPU=${GPU_LIST[$((GPU_IDX % NUM_GPUS))]}
         GPU_IDX=$((GPU_IDX + 1))
 
-        LOG_FILE="${LOG_DIR}/${MODEL_TAG}_${PRESS}_${CR_FMT}.log"
+        LOG_FILE="${LOG_DIR}/${JOB_NAME}.log"
 
-        echo "  [gpu:${GPU}] ${MODEL_TAG} ${PRESS} CR=${CR} -> ${LOG_FILE}"
+        echo "[gpu:${GPU}] ${JOB_NAME} -> ${LOG_FILE}"
 
-        python ~/SparseKV/scripts/eval_baseline.py \
-            --model_path "${MODEL_PATH}" \
-            ${ADAPTER_ARG} \
-            --kvpress_eval_dir "${KVPRESS_EVAL}" \
+        CUDA_VISIBLE_DEVICES="${GPU}" python ~/SparseKV/scripts/eval_wrapper.py \
+            --model "${MODEL}" \
+            --dataset "${DS_NAME}" ${DATA_DIR_ARG} \
+            --press_name "${PRESS}" \
+            --compression_ratio "${CR}" \
             --output_dir "${OUTPUT_DIR}" \
-            --model_tag "${MODEL_TAG}" \
-            --devices "cuda:${GPU}" \
-            --compression_ratios ${CR} \
             > "${LOG_FILE}" 2>&1 &
 
         PIDS+=($!)
+        LAUNCHED=$((LAUNCHED + 1))
     done
+done
 
-    # Wait for all jobs for this model
-    echo "  Waiting for ${#PIDS[@]} remaining jobs..."
-    for pid in "${PIDS[@]}"; do
-        wait "$pid" || echo "  [warn] PID $pid exited with error"
-    done
-    echo "  Done: ${MODEL_TAG}"
-}
-
-run_target() {
-    case $1 in
-        base)
-            run_model "Qwen--Qwen3-8B" ""
-            ;;
-        v6a)
-            run_model "trained_v6a" "--adapter_path ${ADAPTER_DIR}/v6a"
-            ;;
-        v6b)
-            run_model "trained_v6b" "--adapter_path ${ADAPTER_DIR}/v6b"
-            ;;
-        v7)
-            run_model "trained_v7" "--adapter_path ${ADAPTER_DIR}/v7"
-            ;;
-        all)
-            run_target base
-            run_target v6a
-            run_target v6b
-            run_target v7
-            ;;
-        *)
-            echo "Unknown target: $1"
-            echo "Usage: bash scripts/run_all.sh {base|v6a|v6b|v7|all}"
-            exit 1
-            ;;
-    esac
-}
-
-TARGET=${1:-all}
-run_target "$TARGET"
+# Wait for all remaining jobs
+echo ""
+echo "Waiting for ${#PIDS[@]} remaining jobs..."
+for pid in "${PIDS[@]}"; do
+    wait "$pid" || echo "[warn] PID $pid exited with error"
+done
 
 echo ""
 echo "============================================================"
-echo "  ALL EVALUATIONS COMPLETE"
+echo "  COMPLETE"
+echo "  Launched: ${LAUNCHED}  Skipped: ${SKIPPED}  Total: ${TOTAL}"
 echo "  Results: ${OUTPUT_DIR}"
 echo "  Logs: ${LOG_DIR}"
 echo "============================================================"
