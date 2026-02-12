@@ -33,7 +33,7 @@ def parse_args():
     parser.add_argument("--model_path", type=str, required=True, help="Path to base model")
     parser.add_argument("--kvpress_eval_dir", type=str, required=True, help="Path to kvpress/evaluation dir")
     parser.add_argument("--output_dir", type=str, default="./analysis/ruler_results", help="Output directory")
-    parser.add_argument("--devices", type=str, nargs="+", default=["cuda:0"], help="GPU devices to use")
+    parser.add_argument("--devices", type=str, nargs="+", default=None, help="GPU devices (default: all available GPUs)")
     parser.add_argument("--compression_ratios", type=float, nargs="+", default=[0.0, 0.3, 0.5, 0.7, 0.9])
     parser.add_argument("--context_length", type=int, default=4096, help="RULER context length")
     parser.add_argument("--fraction", type=float, default=0.1, help="Fraction of RULER data to use")
@@ -121,7 +121,11 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
 
     model_tag = args.model_tag or os.path.basename(args.model_path).replace("/", "--")
-    devices = args.devices
+    if args.devices is None:
+        num_gpus = torch.cuda.device_count()
+        devices = [f"cuda:{i}" for i in range(num_gpus)]
+    else:
+        devices = args.devices
     crs = args.compression_ratios
 
     print(f"Model: {args.model_path}")
