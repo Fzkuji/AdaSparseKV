@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Evaluate base Qwen3-8B on RULER with SnapKV at various compression ratios.
+"""Evaluate model on RULER with SnapKV at various compression ratios.
 
-Supports parallel evaluation across multiple GPUs — each CR runs on a separate GPU.
+Supports base model or base + LoRA adapter (auto merge).
+Supports parallel evaluation across multiple GPUs.
 
 Usage:
+    # Base model, all GPUs:
+    python scripts/eval_baseline.py \
+        --model_path /mnt/data/zichuanfu/models/Qwen3-8B \
+        --kvpress_eval_dir ~/kvpress/evaluation
+
+    # LoRA model:
+    python scripts/eval_baseline.py \
+        --model_path /mnt/data/zichuanfu/models/Qwen3-8B \
+        --adapter_path ~/models/adapters/v7 \
+        --model_tag trained_v7 \
+        --kvpress_eval_dir ~/kvpress/evaluation
+
     # Single GPU:
     python scripts/eval_baseline.py \
         --model_path /mnt/data/zichuanfu/models/Qwen3-8B \
         --kvpress_eval_dir ~/kvpress/evaluation \
-        --output_dir ~/SparseKV/analysis/ruler_results \
         --devices cuda:0
-
-    # Multi-GPU parallel (one CR per GPU):
-    python scripts/eval_baseline.py \
-        --model_path /mnt/data/zichuanfu/models/Qwen3-8B \
-        --kvpress_eval_dir ~/kvpress/evaluation \
-        --output_dir ~/SparseKV/analysis/ruler_results \
-        --devices cuda:0 cuda:1 cuda:2 cuda:3 cuda:4
 """
 import sys
 import os
@@ -25,15 +30,15 @@ import argparse
 import torch
 import gc
 import multiprocessing as mp
-from functools import partial
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Evaluate base model on RULER with SnapKV")
+    parser = argparse.ArgumentParser(description="Evaluate model on RULER with SnapKV")
     parser.add_argument("--model_path", type=str, required=True, help="Path to base model")
+    parser.add_argument("--adapter_path", type=str, default=None, help="Path to LoRA adapter (optional)")
     parser.add_argument("--kvpress_eval_dir", type=str, required=True, help="Path to kvpress/evaluation dir")
     parser.add_argument("--output_dir", type=str, default="./analysis/ruler_results", help="Output directory")
-    parser.add_argument("--devices", type=str, nargs="+", default=None, help="GPU devices (default: all available GPUs)")
+    parser.add_argument("--devices", type=str, nargs="+", default=None, help="GPU devices (default: all available)")
     parser.add_argument("--compression_ratios", type=float, nargs="+", default=[0.0, 0.3, 0.5, 0.7, 0.9])
     parser.add_argument("--context_length", type=int, default=4096, help="RULER context length")
     parser.add_argument("--fraction", type=float, default=0.1, help="Fraction of RULER data to use")
@@ -41,8 +46,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def run_single_cr(cr, model_path, kvpress_eval_dir, output_dir, device, context_length, fraction, model_tag):
-    """Run evaluation for a single compression ratio on a specific GPU. Runs in a subprocess."""
+def run_single_cr(cr, model_path, adapter_path, kvpress_eval_dir, output_dir, device, context_length, fraction, model_tag):
+    """Run evaluation for a single compression ratio on a specific GPU."""
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
     sys.path.insert(0, kvpress_eval_dir)
@@ -58,6 +63,14 @@ def run_single_cr(cr, model_path, kvpress_eval_dir, output_dir, device, context_
         device_map=device,
         attn_implementation="eager",
     )
+
+    if adapter_path is not None:
+        from peft import PeftModel
+        print(f"[{device}] Loading LoRA adapter from {adapter_path}...")
+        model = PeftModel.from_pretrained(model, adapter_path)
+        print(f"[{device}] Merging LoRA...")
+        model = model.merge_and_unload()
+
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 
@@ -117,6 +130,7 @@ if __name__ == "__main__":
 
     kvpress_eval_dir = os.path.expanduser(args.kvpress_eval_dir)
     output_dir = os.path.expanduser(args.output_dir)
+    adapter_path = os.path.expanduser(args.adapter_path) if args.adapter_path else None
     os.makedirs(output_dir, exist_ok=True)
 
     model_tag = args.model_tag or os.path.basename(args.model_path).replace("/", "--")
@@ -128,6 +142,8 @@ if __name__ == "__main__":
     crs = args.compression_ratios
 
     print(f"Model: {args.model_path}")
+    if adapter_path:
+        print(f"Adapter: {adapter_path}")
     print(f"Tag: {model_tag}")
     print(f"Devices: {devices}")
     print(f"Compression ratios: {crs}")
@@ -135,21 +151,19 @@ if __name__ == "__main__":
     print()
 
     if len(devices) == 1:
-        # Sequential mode on single GPU
         results = {}
         for cr in crs:
             cr_result, metrics = worker((
-                cr, args.model_path, kvpress_eval_dir, output_dir,
+                cr, args.model_path, adapter_path, kvpress_eval_dir, output_dir,
                 devices[0], args.context_length, args.fraction, model_tag,
             ))
             results[f"snapkv_{cr}"] = metrics
     else:
-        # Parallel mode — assign CRs to GPUs round-robin
         task_args = []
         for i, cr in enumerate(crs):
             device = devices[i % len(devices)]
             task_args.append((
-                cr, args.model_path, kvpress_eval_dir, output_dir,
+                cr, args.model_path, adapter_path, kvpress_eval_dir, output_dir,
                 device, args.context_length, args.fraction, model_tag,
             ))
 
