@@ -35,7 +35,7 @@ echo "GPUs:         ${GPUS} (${NUM_GPUS} total, max ${MAX_PARALLEL} parallel)"
 echo "Logs:         ${LOG_DIR}"
 echo ""
 
-DATASETS=("ruler:4096" "ruler:16384" "longbench:" "aime25:")
+DATASETS=("ruler:4096" "ruler:16384" "longbench-v2:" "infinitebench:")
 PRESSES=("no_press:0" "snapkv:0.3" "snapkv:0.5" "snapkv:0.7" "streaming_llm:0.3" "streaming_llm:0.5" "streaming_llm:0.7" "critical_snapkv:0.3" "critical_snapkv:0.5" "critical_snapkv:0.7" "kvzip:0.3" "kvzip:0.5" "kvzip:0.7")
 
 TOTAL=$((${#DATASETS[@]} * ${#PRESSES[@]}))
