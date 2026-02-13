@@ -2,21 +2,27 @@
 # Run all baseline evaluations on a multi-GPU server (no slurm).
 # Strict batch mode: one job per GPU, wait for entire batch to finish before next.
 #
+# Assumes kvpress repo is at ../kvpress relative to this project (sibling directories).
+#
 # Usage:
-#   bash scripts/run_all.sh                    # Run all combos
+#   bash scripts/run_all.sh
 #
 # Environment variables:
 #   MODEL         - model name/path (default: Qwen/Qwen3-8B)
 #   GPUS          - comma-separated GPU ids (default: all available)
-#   OUTPUT_DIR    - output directory (default: ./results/phase1_qwen3)
-#   LOG_DIR       - log directory (default: ~/eval_logs)
 
 set -e
 
+export HF_HUB_OFFLINE=1
+
+# Project root (where this script lives: SparseKV/scripts/)
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+KVPRESS_DIR="$(cd "${PROJECT_DIR}/../kvpress" && pwd)"
+
 MODEL=${MODEL:-Qwen/Qwen3-8B}
-OUTPUT_DIR=${OUTPUT_DIR:-./results/phase1_qwen3}
-LOG_DIR=${LOG_DIR:-~/eval_logs}
-mkdir -p "$LOG_DIR"
+OUTPUT_DIR="${PROJECT_DIR}/results/phase1_qwen3"
+LOG_DIR="${PROJECT_DIR}/results/phase1_qwen3/logs"
+mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
 
 # Auto-detect GPUs
 if [ -z "$GPUS" ]; then
@@ -56,11 +62,16 @@ for ds_entry in "${DATASETS[@]}"; do
 
         # Check if already done
         RESULT_NAME="${DS_NAME}__${DS_DIR:-4096}__$(echo $MODEL | sed 's|/|--|g')__${PRESS}__${CR_FMT}"
-        RESULT_PATH="${OUTPUT_DIR}/${RESULT_NAME}/metrics.json"
-        if [ -f "$RESULT_PATH" ]; then
+        RESULT_DIR="${OUTPUT_DIR}/${RESULT_NAME}"
+        if [ -f "${RESULT_DIR}/metrics.json" ]; then
             echo "[skip] ${JOB_NAME} (done)"
             SKIPPED=$((SKIPPED + 1))
             continue
+        fi
+
+        # Clean up incomplete/failed results
+        if [ -d "$RESULT_DIR" ]; then
+            rm -rf "$RESULT_DIR"
         fi
 
         JOBS+=("${JOB_NAME}|${DS_NAME}|${DATA_DIR_ARG}|${PRESS}|${CR}")
@@ -72,8 +83,13 @@ echo ""
 echo "Pending: ${TOTAL_JOBS}  Skipped: ${SKIPPED}"
 echo ""
 
-# Change to kvpress evaluation dir (eval_wrapper.py calls evaluate.py which must be in cwd)
-cd ~/kvpress/evaluation
+if [ "$TOTAL_JOBS" -eq 0 ]; then
+    echo "All jobs already completed!"
+    exit 0
+fi
+
+# Change to kvpress evaluation dir (evaluate.py must be in cwd)
+cd "${KVPRESS_DIR}/evaluation"
 
 # Run in batches of NUM_GPUS
 LAUNCHED=0
@@ -91,7 +107,7 @@ for ((batch_start=0; batch_start<TOTAL_JOBS; batch_start+=NUM_GPUS)); do
 
         echo "[gpu:${GPU}] ${JOB_NAME}"
 
-        CUDA_VISIBLE_DEVICES="${GPU}" python ~/SparseKV/scripts/eval_wrapper.py \
+        CUDA_VISIBLE_DEVICES="${GPU}" python "${PROJECT_DIR}/scripts/eval_wrapper.py" \
             --model "${MODEL}" \
             --dataset "${DS_NAME}" ${DATA_DIR_ARG} \
             --press_name "${PRESS}" \
@@ -104,7 +120,6 @@ for ((batch_start=0; batch_start<TOTAL_JOBS; batch_start+=NUM_GPUS)); do
         LAUNCHED=$((LAUNCHED + 1))
     done
 
-    # Wait for entire batch to finish
     echo "  Waiting for batch (${#PIDS[@]} jobs)..."
     for j in "${!PIDS[@]}"; do
         if ! wait "${PIDS[$j]}"; then
