@@ -13,7 +13,8 @@
 
 set -e
 
-export HF_HUB_OFFLINE=1
+# Only disable transformers model downloads, not datasets
+export TRANSFORMERS_OFFLINE=1
 
 # Project root (where this script lives: SparseKV/scripts/)
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
