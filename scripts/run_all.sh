@@ -55,9 +55,11 @@ for ds_entry in "${DATASETS[@]}"; do
 
         JOB_NAME="${DS_NAME}_${DS_DIR:-default}_${PRESS}_${CR_FMT}"
 
-        DATA_DIR_ARG=""
+        # Always pass --config_file to avoid YAML defaults leaking
         if [ -n "$DS_DIR" ]; then
             DATA_DIR_ARG="--data_dir $DS_DIR"
+        else
+            DATA_DIR_ARG="--data_dir None"
         fi
 
         # Check if already done
