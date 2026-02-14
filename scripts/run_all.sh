@@ -55,11 +55,10 @@ for ds_entry in "${DATASETS[@]}"; do
 
         JOB_NAME="${DS_NAME}_${DS_DIR:-default}_${PRESS}_${CR_FMT}"
 
-        # Always pass --config_file to avoid YAML defaults leaking
         if [ -n "$DS_DIR" ]; then
             DATA_DIR_ARG="--data_dir $DS_DIR"
         else
-            DATA_DIR_ARG="--data_dir None"
+            DATA_DIR_ARG=""
         fi
 
         # Check if already done
@@ -110,6 +109,7 @@ for ((batch_start=0; batch_start<TOTAL_JOBS; batch_start+=NUM_GPUS)); do
         echo "[gpu:${GPU}] ${JOB_NAME}"
 
         CUDA_VISIBLE_DEVICES="${GPU}" python "${PROJECT_DIR}/scripts/eval_wrapper.py" \
+            --config_file /dev/null \
             --model "${MODEL}" \
             --dataset "${DS_NAME}" ${DATA_DIR_ARG} \
             --press_name "${PRESS}" \
