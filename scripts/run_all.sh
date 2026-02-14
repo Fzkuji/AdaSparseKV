@@ -1,6 +1,7 @@
 #!/bin/bash
 # Run all baseline evaluations on a multi-GPU server (no slurm).
-# Strict batch mode: one job per GPU, wait for entire batch to finish before next.
+# Uses a GPU pool: as soon as any GPU finishes, the next job is dispatched.
+# kvzip jobs run serially (one at a time) to avoid tokenizer cache conflicts.
 #
 # Assumes kvpress repo is at ../kvpress relative to this project (sibling directories).
 #
@@ -12,8 +13,6 @@
 #   GPUS          - comma-separated GPU ids (default: all available)
 
 set -e
-
-# Note: don't set HF_HUB_OFFLINE or TRANSFORMERS_OFFLINE - breaks datasets cache lookup
 
 # Project root (where this script lives: SparseKV/scripts/)
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,8 +40,12 @@ echo ""
 DATASETS=("ruler:4096" "ruler:16384" "longbench-v2:" "infinitebench:")
 PRESSES=("no_press:0" "snapkv:0.3" "snapkv:0.5" "snapkv:0.7" "streaming_llm:0.3" "streaming_llm:0.5" "streaming_llm:0.7" "critical_snapkv:0.3" "critical_snapkv:0.5" "critical_snapkv:0.7" "kvzip:0.3" "kvzip:0.5" "kvzip:0.7")
 
-# Build list of pending jobs
-JOBS=()
+# Presses that must run serially (one GPU at a time) due to resource conflicts
+SERIAL_PRESSES="kvzip"
+
+# Build list of pending jobs (parallel and serial separately)
+PARALLEL_JOBS=()
+SERIAL_JOBS=()
 SKIPPED=0
 for ds_entry in "${DATASETS[@]}"; do
     DS_NAME="${ds_entry%%:*}"
@@ -75,13 +78,20 @@ for ds_entry in "${DATASETS[@]}"; do
             rm -rf "$RESULT_DIR"
         fi
 
-        JOBS+=("${JOB_NAME}|${DS_NAME}|${DATA_DIR_ARG}|${PRESS}|${CR}")
+        JOB_ENTRY="${JOB_NAME}|${DS_NAME}|${DATA_DIR_ARG}|${PRESS}|${CR}"
+        if [[ "$SERIAL_PRESSES" == *"$PRESS"* ]]; then
+            SERIAL_JOBS+=("$JOB_ENTRY")
+        else
+            PARALLEL_JOBS+=("$JOB_ENTRY")
+        fi
     done
 done
 
-TOTAL_JOBS=${#JOBS[@]}
+TOTAL_PARALLEL=${#PARALLEL_JOBS[@]}
+TOTAL_SERIAL=${#SERIAL_JOBS[@]}
+TOTAL_JOBS=$((TOTAL_PARALLEL + TOTAL_SERIAL))
 echo ""
-echo "Pending: ${TOTAL_JOBS}  Skipped: ${SKIPPED}"
+echo "Pending: ${TOTAL_JOBS} (${TOTAL_PARALLEL} parallel + ${TOTAL_SERIAL} serial)  Skipped: ${SKIPPED}"
 echo ""
 
 if [ "$TOTAL_JOBS" -eq 0 ]; then
@@ -92,21 +102,112 @@ fi
 # Change to kvpress evaluation dir (evaluate.py must be in cwd)
 cd "${KVPRESS_DIR}/evaluation"
 
-# Run in batches of NUM_GPUS
+# --- Helper: launch a job on a specific GPU ---
+launch_job() {
+    local GPU=$1
+    local JOB_NAME=$2
+    local DS_NAME=$3
+    local DATA_DIR_ARG=$4
+    local PRESS=$5
+    local CR=$6
+    local LOG_FILE="${LOG_DIR}/${JOB_NAME}.log"
+
+    echo "  [gpu:${GPU}] ${JOB_NAME}"
+
+    CUDA_VISIBLE_DEVICES="${GPU}" python "${PROJECT_DIR}/scripts/eval_wrapper.py" \
+        --config_file /dev/null \
+        --model "${MODEL}" \
+        --dataset "${DS_NAME}" ${DATA_DIR_ARG} \
+        --press_name "${PRESS}" \
+        --compression_ratio "${CR}" \
+        --output_dir "${OUTPUT_DIR}" \
+        > "${LOG_FILE}" 2>&1 &
+}
+
 LAUNCHED=0
 FAILED=0
-for ((batch_start=0; batch_start<TOTAL_JOBS; batch_start+=NUM_GPUS)); do
-    PIDS=()
-    BATCH_NAMES=()
 
-    for ((i=0; i<NUM_GPUS && batch_start+i<TOTAL_JOBS; i++)); do
-        idx=$((batch_start + i))
-        GPU=${GPU_LIST[$i]}
+# --- Phase 1: Run parallel jobs with GPU pool ---
+if [ "$TOTAL_PARALLEL" -gt 0 ]; then
+    echo "=== Phase 1: Parallel jobs (${TOTAL_PARALLEL}) ==="
 
-        IFS='|' read -r JOB_NAME DS_NAME DATA_DIR_ARG PRESS CR <<< "${JOBS[$idx]}"
+    # Track which GPU is running which PID
+    declare -A GPU_PID    # GPU -> PID
+    declare -A PID_NAME   # PID -> job name
+    declare -A PID_GPU    # PID -> GPU
+
+    # Initialize all GPUs as free
+    FREE_GPUS=("${GPU_LIST[@]}")
+
+    JOB_IDX=0
+    while [ "$JOB_IDX" -lt "$TOTAL_PARALLEL" ] || [ "${#PID_NAME[@]}" -gt 0 ]; do
+        # Fill free GPUs with pending jobs
+        while [ "${#FREE_GPUS[@]}" -gt 0 ] && [ "$JOB_IDX" -lt "$TOTAL_PARALLEL" ]; do
+            GPU="${FREE_GPUS[0]}"
+            FREE_GPUS=("${FREE_GPUS[@]:1}")  # pop first
+
+            IFS='|' read -r JOB_NAME DS_NAME DATA_DIR_ARG PRESS CR <<< "${PARALLEL_JOBS[$JOB_IDX]}"
+            launch_job "$GPU" "$JOB_NAME" "$DS_NAME" "$DATA_DIR_ARG" "$PRESS" "$CR"
+            PID=$!
+            GPU_PID[$GPU]=$PID
+            PID_NAME[$PID]="$JOB_NAME"
+            PID_GPU[$PID]="$GPU"
+            LAUNCHED=$((LAUNCHED + 1))
+            JOB_IDX=$((JOB_IDX + 1))
+        done
+
+        # Wait for any one process to finish
+        if [ "${#PID_NAME[@]}" -gt 0 ]; then
+            # Collect all active PIDs
+            ACTIVE_PIDS=("${!PID_NAME[@]}")
+
+            # Wait for any to finish (poll every 5 seconds)
+            while true; do
+                for pid in "${ACTIVE_PIDS[@]}"; do
+                    if ! kill -0 "$pid" 2>/dev/null; then
+                        # Process finished, check exit code
+                        wait "$pid" 2>/dev/null
+                        EXIT_CODE=$?
+                        FINISHED_NAME="${PID_NAME[$pid]}"
+                        FINISHED_GPU="${PID_GPU[$pid]}"
+
+                        if [ "$EXIT_CODE" -ne 0 ]; then
+                            echo "  [FAIL] ${FINISHED_NAME}"
+                            FAILED=$((FAILED + 1))
+                        else
+                            echo "  [done] ${FINISHED_NAME}"
+                        fi
+
+                        # Free the GPU
+                        FREE_GPUS+=("$FINISHED_GPU")
+                        unset GPU_PID[$FINISHED_GPU]
+                        unset PID_NAME[$pid]
+                        unset PID_GPU[$pid]
+                    fi
+                done
+                # If any GPU was freed, break to dispatch new jobs
+                if [ "${#FREE_GPUS[@]}" -gt 0 ]; then
+                    break
+                fi
+                sleep 5
+            done
+        fi
+    done
+    echo ""
+fi
+
+# --- Phase 2: Run serial jobs one at a time ---
+if [ "$TOTAL_SERIAL" -gt 0 ]; then
+    echo "=== Phase 2: Serial jobs (${TOTAL_SERIAL}) ==="
+
+    for ((i=0; i<TOTAL_SERIAL; i++)); do
+        # Use GPU 0 for serial jobs
+        GPU="${GPU_LIST[0]}"
+
+        IFS='|' read -r JOB_NAME DS_NAME DATA_DIR_ARG PRESS CR <<< "${SERIAL_JOBS[$i]}"
         LOG_FILE="${LOG_DIR}/${JOB_NAME}.log"
 
-        echo "[gpu:${GPU}] ${JOB_NAME}"
+        echo "  [gpu:${GPU}] ${JOB_NAME} (serial $((i+1))/${TOTAL_SERIAL})"
 
         CUDA_VISIBLE_DEVICES="${GPU}" python "${PROJECT_DIR}/scripts/eval_wrapper.py" \
             --config_file /dev/null \
@@ -115,24 +216,20 @@ for ((batch_start=0; batch_start<TOTAL_JOBS; batch_start+=NUM_GPUS)); do
             --press_name "${PRESS}" \
             --compression_ratio "${CR}" \
             --output_dir "${OUTPUT_DIR}" \
-            > "${LOG_FILE}" 2>&1 &
+            > "${LOG_FILE}" 2>&1
 
-        PIDS+=($!)
-        BATCH_NAMES+=("${JOB_NAME}")
+        EXIT_CODE=$?
         LAUNCHED=$((LAUNCHED + 1))
-    done
 
-    echo "  Waiting for batch (${#PIDS[@]} jobs)..."
-    for j in "${!PIDS[@]}"; do
-        if ! wait "${PIDS[$j]}"; then
-            echo "  [FAIL] ${BATCH_NAMES[$j]}"
+        if [ "$EXIT_CODE" -ne 0 ]; then
+            echo "  [FAIL] ${JOB_NAME}"
             FAILED=$((FAILED + 1))
         else
-            echo "  [done] ${BATCH_NAMES[$j]}"
+            echo "  [done] ${JOB_NAME}"
         fi
     done
     echo ""
-done
+fi
 
 echo "============================================================"
 echo "  COMPLETE"
