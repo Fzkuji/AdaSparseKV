@@ -65,7 +65,11 @@ for ds_entry in "${DATASETS[@]}"; do
         fi
 
         # Check if already done
-        RESULT_NAME="${DS_NAME}__${DS_DIR:-4096}__$(echo $MODEL | sed 's|/|--|g')__${PRESS}__${CR_FMT}"
+        if [ -n "$DS_DIR" ]; then
+            RESULT_NAME="${DS_NAME}__${DS_DIR}__$(echo $MODEL | sed 's|/|--|g')__${PRESS}__${CR_FMT}"
+        else
+            RESULT_NAME="${DS_NAME}__$(echo $MODEL | sed 's|/|--|g')__${PRESS}__${CR_FMT}"
+        fi
         RESULT_DIR="${OUTPUT_DIR}/${RESULT_NAME}"
         if [ -f "${RESULT_DIR}/metrics.json" ]; then
             echo "[skip] ${JOB_NAME} (done)"
