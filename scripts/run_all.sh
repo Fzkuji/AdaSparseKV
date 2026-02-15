@@ -14,6 +14,17 @@
 
 set -e
 
+# Cleanup: kill all child processes on exit (Ctrl+C, kill, or error)
+cleanup() {
+    echo ""
+    echo "Caught signal, killing all child processes..."
+    kill $(jobs -p) 2>/dev/null
+    wait 2>/dev/null
+    echo "All children terminated."
+    exit 1
+}
+trap cleanup SIGINT SIGTERM EXIT
+
 # Project root (where this script lives: SparseKV/scripts/)
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KVPRESS_DIR="$(cd "${PROJECT_DIR}/../kvpress" && pwd)"
@@ -234,6 +245,9 @@ if [ "$TOTAL_SERIAL" -gt 0 ]; then
     done
     echo ""
 fi
+
+# Disable cleanup trap on normal exit
+trap - SIGINT SIGTERM EXIT
 
 echo "============================================================"
 echo "  COMPLETE"
