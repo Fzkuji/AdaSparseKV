@@ -14,8 +14,6 @@
 #   ONLY_PRESS    - only run this press (e.g. ONLY_PRESS=kvzip)
 #   SKIP_PRESS    - skip this press (e.g. SKIP_PRESS=kvzip)
 
-set -e
-
 # Cleanup: kill entire process group on exit (Ctrl+C, kill, or error)
 cleanup() {
     echo ""
