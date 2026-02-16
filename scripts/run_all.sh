@@ -58,7 +58,8 @@ DATASETS=("ruler:4096" "ruler:16384" "longbench-v2:" "infinitebench:longbook_qa_
 PRESSES=("no_press:0" "snapkv:0.3" "snapkv:0.5" "snapkv:0.7" "streaming_llm:0.3" "streaming_llm:0.5" "streaming_llm:0.7" "critical_snapkv:0.3" "critical_snapkv:0.5" "critical_snapkv:0.7" "kvzip:0.3" "kvzip:0.5" "kvzip:0.7")
 
 # Presses that must run serially (one GPU at a time) due to resource conflicts
-SERIAL_PRESSES="kvzip"
+# kvzip no longer needs serial since we use local model path (no tokenizer cache conflicts)
+SERIAL_PRESSES=""
 
 # Build list of pending jobs (parallel and serial separately)
 PARALLEL_JOBS=()
