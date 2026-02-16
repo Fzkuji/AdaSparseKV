@@ -27,14 +27,28 @@ def monitor_gpu_memory(interval=1.0, result={}):
         time.sleep(interval)
 
 def main():
-    # Pass all args to evaluate.py
+    # Pass all args to evaluate.py (strip --model_tag which is ours)
     eval_args = sys.argv[1:]
+    model_tag = None
+    filtered_args = []
+    i = 0
+    while i < len(eval_args):
+        if eval_args[i] == "--model_tag" and i + 1 < len(eval_args):
+            model_tag = eval_args[i + 1]
+            i += 2
+            continue
+        filtered_args.append(eval_args[i])
+        i += 1
+    eval_args = filtered_args
     
-    # Parse output_dir and build result path for saving profiling info
+    # Parse output_dir and model for renaming
     output_dir = None
+    model_name = None
     for i, arg in enumerate(eval_args):
         if arg == "--output_dir" and i + 1 < len(eval_args):
             output_dir = eval_args[i + 1]
+        if arg == "--model" and i + 1 < len(eval_args):
+            model_name = eval_args[i + 1]
     
     # Start GPU memory monitor
     mem_result = {}
@@ -61,6 +75,25 @@ def main():
         "peak_gpu_memory_gb": round(mem_result.get("peak_mb", 0) / 1024, 2),
     }
     
+    # Rename result dir if --model_tag was provided (align local path naming with HF naming)
+    if model_tag and model_name and output_dir:
+        actual_tag = os.path.expanduser(model_name).replace("/", "--")
+        if actual_tag.startswith("-"):
+            actual_tag = actual_tag.lstrip("-")
+        desired_tag = model_tag
+        if actual_tag != desired_tag:
+            try:
+                for d in os.listdir(output_dir):
+                    if actual_tag in d:
+                        old_path = os.path.join(output_dir, d)
+                        new_name = d.replace(actual_tag, desired_tag)
+                        new_path = os.path.join(output_dir, new_name)
+                        if not os.path.exists(new_path):
+                            os.rename(old_path, new_path)
+                            print(f"[eval_wrapper] Renamed: {d} -> {new_name}")
+            except Exception as e:
+                print(f"[eval_wrapper] Warning: could not rename result dir: {e}")
+
     # Try to compute throughput from predictions
     if output_dir:
         # Find latest result dir

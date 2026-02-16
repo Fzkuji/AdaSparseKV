@@ -24,6 +24,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / "results" / "phase1_qwen3"
 DEFAULT_MODEL = os.path.expanduser("~/models/Qwen3-8B")
+DEFAULT_MODEL_TAG = "Qwen--Qwen3-8B"
 
 DATASETS = [
     ("ruler", "4096"),
@@ -35,16 +36,17 @@ DATASETS = [
 COMPRESSION_RATIOS = [0.3, 0.5, 0.7]
 
 
-def result_dir_name(dataset, data_dir, model, cr):
-    model_tag = model.replace("/", "--")
+def result_dir_name(dataset, data_dir, model, cr, model_tag=None):
+    if model_tag is None:
+        model_tag = model.replace("/", "--")
     if data_dir:
         return f"{dataset}__{data_dir}__{model_tag}__kvzip__{cr:.2f}"
     else:
         return f"{dataset}__{model_tag}__kvzip__{cr:.2f}"
 
 
-def run_one(dataset, data_dir, cr, model, output_dir, gpu, fraction=1.0):
-    name = result_dir_name(dataset, data_dir, model, cr)
+def run_one(dataset, data_dir, cr, model, output_dir, gpu, fraction=1.0, model_tag=None):
+    name = result_dir_name(dataset, data_dir, model, cr, model_tag)
     result_path = output_dir / name / "metrics.json"
 
     if result_path.exists():
@@ -68,6 +70,7 @@ def run_one(dataset, data_dir, cr, model, output_dir, gpu, fraction=1.0):
         "--compression_ratio", str(cr),
         "--output_dir", str(output_dir),
         "--fraction", str(fraction),
+        *(["--model_tag", model_tag] if model_tag else []),
     ]
     if data_dir:
         cmd += ["--data_dir", data_dir]
@@ -94,6 +97,7 @@ def main():
     parser.add_argument("--data_dir", default=None, help="Data dir for single dataset run")
     parser.add_argument("--compression_ratio", type=float, default=None, help="Run only this CR")
     parser.add_argument("--fraction", type=float, default=1.0, help="Fraction of dataset to evaluate (e.g. 0.1 for 10%%)")
+    parser.add_argument("--model_tag", default=DEFAULT_MODEL_TAG, help="Model tag for result dir naming (default: Qwen--Qwen3-8B)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -102,19 +106,19 @@ def main():
     # Single job mode
     if args.dataset and args.compression_ratio is not None:
         data_dir = args.data_dir or ""
-        ok = run_one(args.dataset, data_dir, args.compression_ratio, args.model, output_dir, args.gpu, args.fraction)
+        ok = run_one(args.dataset, data_dir, args.compression_ratio, args.model, output_dir, args.gpu, args.fraction, args.model_tag)
         sys.exit(0 if ok else 1)
 
     # Run all 12 kvzip jobs
     done, failed, skipped = 0, 0, 0
     for ds, dd in DATASETS:
         for cr in COMPRESSION_RATIOS:
-            name = result_dir_name(ds, dd, args.model, cr)
+            name = result_dir_name(ds, dd, args.model, cr, args.model_tag)
             if (output_dir / name / "metrics.json").exists():
                 print(f"[skip] {name}")
                 skipped += 1
                 continue
-            ok = run_one(ds, dd, cr, args.model, output_dir, args.gpu, args.fraction)
+            ok = run_one(ds, dd, cr, args.model, output_dir, args.gpu, args.fraction, args.model_tag)
             if ok:
                 done += 1
             else:

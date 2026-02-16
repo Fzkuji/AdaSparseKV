@@ -10,6 +10,7 @@
 #
 # Environment variables:
 #   MODEL         - model name/path (default: ~/models/Qwen3-8B)
+#   MODEL_TAG     - tag for result dir naming (default: Qwen--Qwen3-8B)
 #   GPUS          - comma-separated GPU ids (default: all available)
 #   ONLY_PRESS    - only run this press (e.g. ONLY_PRESS=kvzip)
 #   SKIP_PRESS    - skip this press (e.g. SKIP_PRESS=kvzip)
@@ -30,7 +31,11 @@ trap cleanup SIGINT SIGTERM EXIT
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KVPRESS_DIR="$(cd "${PROJECT_DIR}/../kvpress" && pwd)"
 
+# MODEL: path used to load the model (local or HF hub name)
+# MODEL_TAG: name used in result directory naming (default: Qwen--Qwen3-8B)
 MODEL=${MODEL:-$(echo ~/models/Qwen3-8B)}
+MODEL_TAG=${MODEL_TAG:-"Qwen--Qwen3-8B"}
+export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}
 OUTPUT_DIR="${PROJECT_DIR}/results/phase1_qwen3"
 LOG_DIR="${PROJECT_DIR}/results/phase1_qwen3/logs"
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
@@ -86,9 +91,9 @@ for ds_entry in "${DATASETS[@]}"; do
 
         # Check if already done
         if [ -n "$DS_DIR" ]; then
-            RESULT_NAME="${DS_NAME}__${DS_DIR}__$(echo $MODEL | sed 's|/|--|g')__${PRESS}__${CR_FMT}"
+            RESULT_NAME="${DS_NAME}__${DS_DIR}__${MODEL_TAG}__${PRESS}__${CR_FMT}"
         else
-            RESULT_NAME="${DS_NAME}__$(echo $MODEL | sed 's|/|--|g')__${PRESS}__${CR_FMT}"
+            RESULT_NAME="${DS_NAME}__${MODEL_TAG}__${PRESS}__${CR_FMT}"
         fi
         RESULT_DIR="${OUTPUT_DIR}/${RESULT_NAME}"
         if [ -f "${RESULT_DIR}/metrics.json" ]; then
@@ -139,6 +144,7 @@ launch_job() {
     echo "  [gpu:${GPU}] ${JOB_NAME}"
 
     CUDA_VISIBLE_DEVICES="${GPU}" python "${PROJECT_DIR}/scripts/eval_wrapper.py" \
+        --model_tag "${MODEL_TAG}" \
         --config_file /dev/null \
         --model "${MODEL}" \
         --dataset "${DS_NAME}" ${DATA_DIR_ARG} \
@@ -234,6 +240,7 @@ if [ "$TOTAL_SERIAL" -gt 0 ]; then
         echo "  [gpu:${GPU}] ${JOB_NAME} (serial $((i+1))/${TOTAL_SERIAL})"
 
         CUDA_VISIBLE_DEVICES="${GPU}" python "${PROJECT_DIR}/scripts/eval_wrapper.py" \
+            --model_tag "${MODEL_TAG}" \
             --config_file /dev/null \
             --model "${MODEL}" \
             --dataset "${DS_NAME}" ${DATA_DIR_ARG} \
