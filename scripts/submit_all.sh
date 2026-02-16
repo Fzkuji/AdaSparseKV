@@ -13,7 +13,7 @@ MODEL_KEY=${1:-qwen3}
 # Determine model path and output directory
 case $MODEL_KEY in
     qwen3)
-        MODEL="Qwen/Qwen3-8B"
+        MODEL="$(echo ~/models/Qwen3-8B)"
         OUTPUT_DIR="./results/phase1_qwen3"
         ;;
     llama)
