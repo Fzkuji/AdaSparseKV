@@ -23,7 +23,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT_DIR = PROJECT_DIR / "results" / "phase1_qwen3"
-DEFAULT_MODEL = "Qwen/Qwen3-8B"
+DEFAULT_MODEL = os.path.expanduser("~/models/Qwen3-8B")
 
 DATASETS = [
     ("ruler", "4096"),

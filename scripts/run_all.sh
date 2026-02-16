@@ -30,7 +30,7 @@ trap cleanup SIGINT SIGTERM EXIT
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KVPRESS_DIR="$(cd "${PROJECT_DIR}/../kvpress" && pwd)"
 
-MODEL=${MODEL:-Qwen/Qwen3-8B}
+MODEL=${MODEL:-$(echo ~/models/Qwen3-8B)}
 OUTPUT_DIR="${PROJECT_DIR}/results/phase1_qwen3"
 LOG_DIR="${PROJECT_DIR}/results/phase1_qwen3/logs"
 mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
