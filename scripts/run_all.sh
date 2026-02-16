@@ -11,6 +11,8 @@
 # Environment variables:
 #   MODEL         - model name/path (default: Qwen/Qwen3-8B)
 #   GPUS          - comma-separated GPU ids (default: all available)
+#   ONLY_PRESS    - only run this press (e.g. ONLY_PRESS=kvzip)
+#   SKIP_PRESS    - skip this press (e.g. SKIP_PRESS=kvzip)
 
 set -e
 
@@ -67,6 +69,14 @@ for ds_entry in "${DATASETS[@]}"; do
         PRESS="${press_entry%%:*}"
         CR="${press_entry##*:}"
         CR_FMT=$(printf "%.2f" "$CR")
+
+        # Filter by ONLY_PRESS / SKIP_PRESS
+        if [ -n "$ONLY_PRESS" ] && [ "$PRESS" != "$ONLY_PRESS" ]; then
+            continue
+        fi
+        if [ -n "$SKIP_PRESS" ] && [ "$PRESS" == "$SKIP_PRESS" ]; then
+            continue
+        fi
 
         JOB_NAME="${DS_NAME}_${DS_DIR:-default}_${PRESS}_${CR_FMT}"
 
