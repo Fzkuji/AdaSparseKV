@@ -43,7 +43,7 @@ def result_dir_name(dataset, data_dir, model, cr):
         return f"{dataset}__{model_tag}__kvzip__{cr:.2f}"
 
 
-def run_one(dataset, data_dir, cr, model, output_dir, gpu):
+def run_one(dataset, data_dir, cr, model, output_dir, gpu, fraction=1.0):
     name = result_dir_name(dataset, data_dir, model, cr)
     result_path = output_dir / name / "metrics.json"
 
@@ -67,6 +67,7 @@ def run_one(dataset, data_dir, cr, model, output_dir, gpu):
         "--press_name", "kvzip",
         "--compression_ratio", str(cr),
         "--output_dir", str(output_dir),
+        "--fraction", str(fraction),
     ]
     if data_dir:
         cmd += ["--data_dir", data_dir]
@@ -92,6 +93,7 @@ def main():
     parser.add_argument("--dataset", default=None, help="Run only this dataset")
     parser.add_argument("--data_dir", default=None, help="Data dir for single dataset run")
     parser.add_argument("--compression_ratio", type=float, default=None, help="Run only this CR")
+    parser.add_argument("--fraction", type=float, default=1.0, help="Fraction of dataset to evaluate (e.g. 0.1 for 10%%)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -100,7 +102,7 @@ def main():
     # Single job mode
     if args.dataset and args.compression_ratio is not None:
         data_dir = args.data_dir or ""
-        ok = run_one(args.dataset, data_dir, args.compression_ratio, args.model, output_dir, args.gpu)
+        ok = run_one(args.dataset, data_dir, args.compression_ratio, args.model, output_dir, args.gpu, args.fraction)
         sys.exit(0 if ok else 1)
 
     # Run all 12 kvzip jobs
@@ -112,7 +114,7 @@ def main():
                 print(f"[skip] {name}")
                 skipped += 1
                 continue
-            ok = run_one(ds, dd, cr, args.model, output_dir, args.gpu)
+            ok = run_one(ds, dd, cr, args.model, output_dir, args.gpu, args.fraction)
             if ok:
                 done += 1
             else:
