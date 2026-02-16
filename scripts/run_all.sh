@@ -31,8 +31,8 @@ trap cleanup SIGINT SIGTERM EXIT
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KVPRESS_DIR="$(cd "${PROJECT_DIR}/../kvpress" && pwd)"
 
-# MODEL: path used to load the model (local or HF hub name)
-# MODEL_TAG: name used in result directory naming (default: Qwen--Qwen3-8B)
+# MODEL: path used to load the model (local path or HF hub name)
+# Model tag for result dir naming is auto-detected from config.json
 MODEL=${MODEL:-$(echo ~/models/Qwen3-8B)}
 MODEL_TAG=${MODEL_TAG:-"Qwen--Qwen3-8B"}
 export HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com}

@@ -57,30 +57,41 @@ def main():
             model_name = eval_args[i + 1]
             model_arg_idx = i + 1
 
-    # If model_tag provided and model is a local path, create symlink so evaluate.py
-    # sees a clean name like "Qwen/Qwen3-8B" instead of "/mnt/data/.../Qwen3-8B"
+    # If model is a local path, read config.json to get the HF name (e.g. "Qwen/Qwen3-8B")
+    # and create a symlink so evaluate.py produces correctly-named result directories.
     symlink_model_path = None
-    if model_tag and model_name and model_arg_idx is not None:
-        # model_tag is like "Qwen--Qwen3-8B", convert to path: "Qwen/Qwen3-8B"
-        rel_model_path = model_tag.replace("--", "/")
+    if model_name and model_arg_idx is not None:
         real_model_path = os.path.expanduser(model_name)
-
-        if os.path.isdir(real_model_path) and rel_model_path != real_model_path:
-            # Create symlink in cwd: e.g. ./Qwen/Qwen3-8B -> /mnt/data/.../Qwen3-8B
-            parts = rel_model_path.split("/")
-            if len(parts) >= 2:
-                symlink_dir = os.path.join(*parts[:-1])
-                symlink_path = rel_model_path
-                os.makedirs(symlink_dir, exist_ok=True)
+        # Auto-detect HF name from config.json if no model_tag provided
+        if not model_tag and os.path.isdir(real_model_path):
+            config_path = os.path.join(real_model_path, "config.json")
+            if os.path.exists(config_path):
                 try:
-                    os.symlink(real_model_path, symlink_path)
-                except FileExistsError:
-                    # Another process already created it, that's fine
+                    with open(config_path) as f:
+                        cfg = json.load(f)
+                    hf_name = cfg.get("_name_or_path", "")
+                    if "/" in hf_name and not hf_name.startswith("/"):
+                        model_tag = hf_name.replace("/", "--")
+                        print(f"[eval_wrapper] Auto-detected model tag from config.json: {model_tag}")
+                except Exception:
                     pass
-                symlink_model_path = symlink_path
-                # Override --model in args to use the symlink
-                eval_args[model_arg_idx] = symlink_path
-                print(f"[eval_wrapper] Symlinked: {symlink_path} -> {real_model_path}")
+        if model_tag:
+            rel_model_path = model_tag.replace("--", "/")
+
+            if os.path.isdir(real_model_path) and rel_model_path != real_model_path:
+                # Create symlink in cwd: e.g. ./Qwen/Qwen3-8B -> /mnt/data/.../Qwen3-8B
+                parts = rel_model_path.split("/")
+                if len(parts) >= 2:
+                    symlink_dir = os.path.join(*parts[:-1])
+                    symlink_path = rel_model_path
+                    os.makedirs(symlink_dir, exist_ok=True)
+                    try:
+                        os.symlink(real_model_path, symlink_path)
+                    except FileExistsError:
+                        pass
+                    symlink_model_path = symlink_path
+                    eval_args[model_arg_idx] = symlink_path
+                    print(f"[eval_wrapper] Symlinked: {symlink_path} -> {real_model_path}")
 
     # Start GPU memory monitor
     mem_result = {}
